@@ -1,6 +1,6 @@
 # Sure MCP Server
 
-A Model Context Protocol (MCP) server for integrating with the [Sure](https://github.com/we-promise/sure) self-hosted personal finance platform. This server provides access to your financial accounts, transactions, categories, and AI chat through Claude Desktop.
+A Model Context Protocol (MCP) server for integrating with the [Sure](https://github.com/we-promise/sure) self-hosted personal finance platform. This server provides access to your financial accounts, transactions, investment trades and holdings, categories, and AI chat through Claude Desktop.
 
 ## Quick Start
 
@@ -81,6 +81,13 @@ Once configured, use these tools directly in Claude Desktop:
 | `create_transaction` | Create new transaction | `account_id`, `amount`, `name`, `date`, `category_id`, `notes`, `nature` |
 | `update_transaction` | Update transaction | `transaction_id`, `amount`, `name`, `date`, `category_id`, `notes` |
 | `delete_transaction` | Delete transaction | `transaction_id` |
+| `get_trades` | Get investment trades with filtering | `limit`, `account_id`, `account_ids`, `start_date`, `end_date` |
+| `get_trade` | Get single trade | `trade_id` |
+| `create_trade` | Record a stock buy/sell/dividend/deposit/withdrawal/interest | `account_id`, `trade_type`, `date`, `ticker`, `security_id`, `manual_ticker`, `qty`, `price`, `amount`, `fee`, `currency`, `category_id`, `investment_activity_label`, `transfer_account_id` |
+| `update_trade` | Update trade | `trade_id`, `trade_type`, `date`, `qty`, `price`, `amount`, `currency`, `category_id`, `investment_activity_label`, `notes` |
+| `delete_trade` | Delete trade | `trade_id` |
+| `get_holdings` | Get stock holdings (read-only) with filtering | `limit`, `account_id`, `account_ids`, `security_id`, `date`, `start_date`, `end_date` |
+| `get_holding` | Get single holding | `holding_id` |
 | `get_categories` | Get all categories | None |
 | `get_category` | Get single category | `category_id` |
 | `sync_accounts` | Trigger account sync | None |
@@ -106,6 +113,23 @@ For local Docker setup, use `SURE_API_URL=http://localhost:3000` and `SURE_VERIF
 
 - All dates should be in `YYYY-MM-DD` format (e.g., "2024-12-15")
 - Transaction amounts: use `nature` field to specify "income" or "expense"
+
+## Investment Trades
+
+`create_trade` requires the target account to be an **investment** account
+(or a crypto account with subtype "exchange") -- Sure rejects trades on
+regular bank/card accounts. Required fields depend on `trade_type`:
+
+| `trade_type` | Required fields | Notes |
+|---|---|---|
+| `buy` / `sell` | `account_id`, `date`, `qty`, `price`, plus one of `ticker` / `security_id` / `manual_ticker` | `fee` and `currency` optional |
+| `dividend` | `account_id`, `date`, `amount`, plus one of `ticker` / `security_id` / `manual_ticker` | |
+| `interest` | `account_id`, `date`, `amount` | `ticker`/`manual_ticker` optional |
+| `deposit` / `withdrawal` | `account_id`, `date`, `amount` | optional `transfer_account_id` links it to another account as a transfer |
+
+`get_holdings` / `get_holding` are read-only -- Sure computes current stock
+positions automatically from your trade history and market prices, so there
+is no create/update/delete for holdings.
 
 ## Troubleshooting
 
