@@ -4,6 +4,7 @@ import os
 import logging
 import json
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
@@ -70,6 +71,23 @@ def handle_response(response: httpx.Response) -> Any:
     if response.headers.get("content-type", "").startswith("application/json"):
         return response.json()
     return response.text
+
+
+def encode_path_id(value: str) -> str:
+    """
+    Percent-encode a value for safe use as a single URL path segment.
+
+    httpx resolves relative request paths against the client's base_url the
+    same way a browser resolves links, which means a raw "/" in an ID would
+    add extra path segments and a raw "." or ".." would be collapsed as a
+    dot-segment -- either way potentially sending the request to a different
+    endpoint than intended. Percent-encoding handles "/", but "." and ".."
+    are left untouched by encoding (they're valid unreserved characters), so
+    those exact values are rejected outright instead.
+    """
+    if not value or value in (".", ".."):
+        raise ValueError(f"Invalid ID: {value!r}")
+    return quote(value, safe="")
 
 
 @mcp.tool()
@@ -386,9 +404,12 @@ def get_trades(
             data = handle_response(response)
 
             # Handle paginated response
-            trades = data.get("trades") or data.get("data") or data
-            if isinstance(trades, dict):
-                trades = trades.get("trades", [])
+            if isinstance(data, dict):
+                trades = data.get("trades") or data.get("data") or data
+                if isinstance(trades, dict):
+                    trades = trades.get("trades", [])
+            else:
+                trades = data
 
             logger.info(f"✅ Retrieved {len(trades) if isinstance(trades, list) else 'unknown'} trades")
             return json.dumps(trades, indent=2, default=str)
@@ -407,7 +428,7 @@ def get_trade(trade_id: str) -> str:
     """
     try:
         with get_client() as client:
-            response = client.get(f"/api/v1/trades/{trade_id}")
+            response = client.get(f"/api/v1/trades/{encode_path_id(trade_id)}")
             data = handle_response(response)
 
             return json.dumps(data, indent=2, default=str)
@@ -552,7 +573,7 @@ def update_trade(
                 payload["notes"] = notes
 
             response = client.patch(
-                f"/api/v1/trades/{trade_id}",
+                f"/api/v1/trades/{encode_path_id(trade_id)}",
                 json={"trade": payload}
             )
             data = handle_response(response)
@@ -574,7 +595,7 @@ def delete_trade(trade_id: str) -> str:
     """
     try:
         with get_client() as client:
-            response = client.delete(f"/api/v1/trades/{trade_id}")
+            response = client.delete(f"/api/v1/trades/{encode_path_id(trade_id)}")
             data = handle_response(response)
 
             logger.info(f"✅ Deleted trade {trade_id}")
@@ -629,9 +650,12 @@ def get_holdings(
             data = handle_response(response)
 
             # Handle paginated response
-            holdings = data.get("holdings") or data.get("data") or data
-            if isinstance(holdings, dict):
-                holdings = holdings.get("holdings", [])
+            if isinstance(data, dict):
+                holdings = data.get("holdings") or data.get("data") or data
+                if isinstance(holdings, dict):
+                    holdings = holdings.get("holdings", [])
+            else:
+                holdings = data
 
             logger.info(f"✅ Retrieved {len(holdings) if isinstance(holdings, list) else 'unknown'} holdings")
             return json.dumps(holdings, indent=2, default=str)
@@ -650,7 +674,7 @@ def get_holding(holding_id: str) -> str:
     """
     try:
         with get_client() as client:
-            response = client.get(f"/api/v1/holdings/{holding_id}")
+            response = client.get(f"/api/v1/holdings/{encode_path_id(holding_id)}")
             data = handle_response(response)
 
             return json.dumps(data, indent=2, default=str)
