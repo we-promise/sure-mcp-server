@@ -789,16 +789,18 @@ def merge_categories(
     try:
         with get_client() as client:
             moved = 0
-            page = 1
             per_page = 100
 
             while True:
+                # Always fetch page 1: reassigning transactions shrinks the
+                # source category, so offset pagination would skip records
+                # that shift into earlier pages.
                 response = client.get(
                     "/api/v1/transactions",
                     params={
                         "category_ids": from_category_id,
                         "per_page": per_page,
-                        "page": page,
+                        "page": 1,
                     },
                 )
                 data = handle_response(response)
@@ -819,7 +821,6 @@ def merge_categories(
 
                 if len(transactions) < per_page:
                     break
-                page += 1
 
             logger.info(f"✅ Merged {moved} transactions into category {into_category_id}")
             return json.dumps(
