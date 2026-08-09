@@ -259,6 +259,7 @@ def create_transaction(
     category_id: Optional[str] = None,
     notes: Optional[str] = None,
     nature: Optional[str] = None,
+    tag_ids: Optional[str] = None,
 ) -> str:
     """
     Create a new transaction in Sure.
@@ -271,6 +272,7 @@ def create_transaction(
         category_id: Optional category ID
         notes: Optional notes
         nature: Optional "income" or "expense" to set amount sign
+        tag_ids: Optional comma-separated list of tag IDs to attach
     """
     try:
         with get_client() as client:
@@ -287,6 +289,8 @@ def create_transaction(
                 payload["notes"] = notes
             if nature:
                 payload["nature"] = nature
+            if tag_ids:
+                payload["tag_ids"] = [t.strip() for t in tag_ids.split(",") if t.strip()]
 
             response = client.post(
                 "/api/v1/transactions",
@@ -309,6 +313,7 @@ def update_transaction(
     date: Optional[str] = None,
     category_id: Optional[str] = None,
     notes: Optional[str] = None,
+    tag_ids: Optional[str] = None,
 ) -> str:
     """
     Update an existing transaction in Sure.
@@ -320,6 +325,7 @@ def update_transaction(
         date: New transaction date in YYYY-MM-DD format
         category_id: New category ID
         notes: New notes
+        tag_ids: Optional comma-separated list of tag IDs (use empty string to clear all tags)
     """
     try:
         with get_client() as client:
@@ -335,6 +341,8 @@ def update_transaction(
                 payload["category_id"] = category_id
             if notes is not None:
                 payload["notes"] = notes
+            if tag_ids is not None:
+                payload["tag_ids"] = [t.strip() for t in tag_ids.split(",") if t.strip()]
 
             response = client.patch(
                 f"/api/v1/transactions/{transaction_id}",
@@ -720,6 +728,181 @@ def get_category(category_id: str) -> str:
     except Exception as e:
         logger.error(f"Failed to get category: {e}")
         return f"Error getting category: {str(e)}"
+
+
+@mcp.tool()
+def create_category(
+    name: str,
+    color: Optional[str] = None,
+    icon: Optional[str] = None,
+    parent_id: Optional[str] = None,
+) -> str:
+    """
+    Create a new transaction category in Sure.
+
+    Args:
+        name: Category name (e.g. "Tax", "Investments")
+        color: Optional hex color code (e.g. "#6172F3"); omitted if not provided
+        icon: Optional icon key
+        parent_id: Optional parent category ID to make this a subcategory
+    """
+    try:
+        with get_client() as client:
+            payload: Dict[str, Any] = {"name": name}
+            if color:
+                payload["color"] = color
+            if icon:
+                payload["icon"] = icon
+            if parent_id:
+                payload["parent_id"] = parent_id
+
+            response = client.post(
+                "/api/v1/categories",
+                json={"category": payload}
+            )
+            data = handle_response(response)
+
+            logger.info(f"✅ Created category '{name}'")
+            return json.dumps(data, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to create category: {e}")
+        return f"Error creating category: {str(e)}"
+
+
+@mcp.tool()
+def merge_categories(
+    from_category_id: str,
+    into_category_id: str,
+) -> str:
+    """
+    Move every transaction from one category into another (merge).
+
+    Sure's UI offers "delete category" with the option to move all its
+    transactions elsewhere; the public API has no delete/merge endpoint,
+    so this tool performs the equivalent merge by reassigning every
+    transaction in `from_category_id` to `into_category_id`.
+
+    Args:
+        from_category_id: The ID of the category to merge away
+        into_category_id: The ID of the category that receives the transactions
+    """
+    try:
+        with get_client() as client:
+            moved = 0
+            page = 1
+            per_page = 100
+
+            while True:
+                response = client.get(
+                    "/api/v1/transactions",
+                    params={
+                        "category_ids": from_category_id,
+                        "per_page": per_page,
+                        "page": page,
+                    },
+                )
+                data = handle_response(response)
+                transactions = data.get("transactions") or data.get("data") or data
+                if isinstance(transactions, dict):
+                    transactions = transactions.get("transactions", [])
+
+                for transaction in transactions:
+                    txn_id = transaction.get("id")
+                    if not txn_id:
+                        continue
+                    update_response = client.patch(
+                        f"/api/v1/transactions/{encode_path_id(txn_id)}",
+                        json={"transaction": {"category_id": into_category_id}},
+                    )
+                    handle_response(update_response)
+                    moved += 1
+
+                if len(transactions) < per_page:
+                    break
+                page += 1
+
+            logger.info(f"✅ Merged {moved} transactions into category {into_category_id}")
+            return json.dumps(
+                {"message": f"Moved {moved} transactions", "from_category_id": from_category_id, "into_category_id": into_category_id},
+                indent=2,
+            )
+    except Exception as e:
+        logger.error(f"Failed to merge categories: {e}")
+        return f"Error merging categories: {str(e)}"
+
+
+@mcp.tool()
+def get_tags() -> str:
+    """Get all tags from Sure."""
+    try:
+        with get_client() as client:
+            response = client.get("/api/v1/tags")
+            data = handle_response(response)
+
+            # The tags endpoint returns a JSON array directly
+            tags = data
+            if isinstance(tags, dict):
+                tags = tags.get("tags") or tags.get("data") or []
+
+            logger.info(f"✅ Retrieved {len(tags) if isinstance(tags, list) else 'unknown'} tags")
+            return json.dumps(tags, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to get tags: {e}")
+        return f"Error getting tags: {str(e)}"
+
+
+@mcp.tool()
+def create_tag(
+    name: str,
+    color: Optional[str] = None,
+) -> str:
+    """
+    Create a new tag in Sure.
+
+    Tags are lightweight labels (e.g. "ITR 2026") that can be attached to
+    transactions via tag_ids on create_transaction/update_transaction.
+
+    Args:
+        name: Tag name
+        color: Optional hex color (e.g. "#3b82f6"); auto-assigned if omitted
+    """
+    try:
+        with get_client() as client:
+            payload: Dict[str, Any] = {"name": name}
+            if color:
+                payload["color"] = color
+
+            response = client.post(
+                "/api/v1/tags",
+                json={"tag": payload}
+            )
+            data = handle_response(response)
+
+            logger.info(f"✅ Created tag '{name}'")
+            return json.dumps(data, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to create tag: {e}")
+        return f"Error creating tag: {str(e)}"
+
+
+@mcp.tool()
+def delete_tag(tag_id: str) -> str:
+    """
+    Delete a tag from Sure.
+
+    Args:
+        tag_id: The ID of the tag to delete
+    """
+    try:
+        with get_client() as client:
+            response = client.delete(f"/api/v1/tags/{encode_path_id(tag_id)}")
+            handle_response(response)
+
+            logger.info(f"✅ Deleted tag {tag_id}")
+            return json.dumps({"message": "Tag deleted successfully"}, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to delete tag: {e}")
+        return f"Error deleting tag: {str(e)}"
 
 
 @mcp.tool()
