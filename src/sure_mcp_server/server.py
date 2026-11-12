@@ -4,6 +4,7 @@ import os
 import logging
 import json
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
@@ -70,6 +71,23 @@ def handle_response(response: httpx.Response) -> Any:
     if response.headers.get("content-type", "").startswith("application/json"):
         return response.json()
     return response.text
+
+
+def encode_path_id(value: str) -> str:
+    """
+    Percent-encode a value for safe use as a single URL path segment.
+
+    httpx resolves relative request paths against the client's base_url the
+    same way a browser resolves links, which means a raw "/" in an ID would
+    add extra path segments and a raw "." or ".." would be collapsed as a
+    dot-segment -- either way potentially sending the request to a different
+    endpoint than intended. Percent-encoding handles "/", but "." and ".."
+    are left untouched by encoding (they're valid unreserved characters), so
+    those exact values are rejected outright instead.
+    """
+    if not value or value in (".", ".."):
+        raise ValueError(f"Invalid ID: {value!r}")
+    return quote(value, safe="")
 
 
 @mcp.tool()
@@ -349,6 +367,320 @@ def delete_transaction(transaction_id: str) -> str:
     except Exception as e:
         logger.error(f"Failed to delete transaction: {e}")
         return f"Error deleting transaction: {str(e)}"
+
+
+@mcp.tool()
+def get_trades(
+    limit: int = 25,
+    account_id: Optional[str] = None,
+    account_ids: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> str:
+    """
+    Get investment trades (stock buys/sells/dividends/etc.) from Sure.
+
+    Args:
+        limit: Number of trades per page (default: 25, max: 100)
+        account_id: Filter by a single investment account ID
+        account_ids: Comma-separated account IDs to filter by
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+    """
+    try:
+        with get_client() as client:
+            params: Dict[str, Any] = {"per_page": min(limit, 100)}
+
+            if account_id:
+                params["account_id"] = account_id
+            if account_ids:
+                params["account_ids"] = account_ids
+            if start_date:
+                params["start_date"] = start_date
+            if end_date:
+                params["end_date"] = end_date
+
+            response = client.get("/api/v1/trades", params=params)
+            data = handle_response(response)
+
+            # Handle paginated response
+            if isinstance(data, dict):
+                trades = data.get("trades") or data.get("data") or data
+                if isinstance(trades, dict):
+                    trades = trades.get("trades", [])
+            else:
+                trades = data
+
+            logger.info(f"✅ Retrieved {len(trades) if isinstance(trades, list) else 'unknown'} trades")
+            return json.dumps(trades, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to get trades: {e}")
+        return f"Error getting trades: {str(e)}"
+
+
+@mcp.tool()
+def get_trade(trade_id: str) -> str:
+    """
+    Get a single trade by ID.
+
+    Args:
+        trade_id: The ID of the trade
+    """
+    try:
+        with get_client() as client:
+            response = client.get(f"/api/v1/trades/{encode_path_id(trade_id)}")
+            data = handle_response(response)
+
+            return json.dumps(data, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to get trade: {e}")
+        return f"Error getting trade: {str(e)}"
+
+
+@mcp.tool()
+def create_trade(
+    account_id: str,
+    trade_type: str,
+    date: str,
+    ticker: Optional[str] = None,
+    security_id: Optional[str] = None,
+    manual_ticker: Optional[str] = None,
+    qty: Optional[float] = None,
+    price: Optional[float] = None,
+    amount: Optional[float] = None,
+    fee: Optional[float] = None,
+    currency: Optional[str] = None,
+    category_id: Optional[str] = None,
+    investment_activity_label: Optional[str] = None,
+    transfer_account_id: Optional[str] = None,
+) -> str:
+    """
+    Record a stock trade on an investment account in Sure (buy, sell,
+    dividend, deposit, withdrawal, or interest). The account must be an
+    investment account (or a crypto account of subtype "exchange") -- Sure
+    rejects trades on regular bank/card accounts.
+
+    Args:
+        account_id: The investment account ID to record the trade against
+        trade_type: One of "buy", "sell", "dividend", "deposit", "withdrawal", "interest"
+        date: Trade date in YYYY-MM-DD format
+        ticker: Stock ticker symbol (e.g. "AAPL", "RELIANCE") -- required for
+                buy/sell/dividend unless security_id or manual_ticker is given
+        security_id: Sure's internal security ID, as an alternative to ticker
+        manual_ticker: Ticker for a security Sure doesn't track market prices for
+        qty: Number of shares -- required for buy/sell
+        price: Price per share -- required for buy/sell
+        amount: Total cash amount -- required for dividend/deposit/withdrawal/interest
+        fee: Optional broker fee, applies to buy/sell
+        currency: Optional currency code, defaults to the account's currency
+        category_id: Optional category ID
+        investment_activity_label: Optional activity label (same list as transactions)
+        transfer_account_id: Optional linked account for deposit/withdrawal transfers
+    """
+    try:
+        with get_client() as client:
+            payload: Dict[str, Any] = {
+                "account_id": account_id,
+                "type": trade_type,
+                "date": date,
+            }
+
+            if ticker:
+                payload["ticker"] = ticker
+            if security_id:
+                payload["security_id"] = security_id
+            if manual_ticker:
+                payload["manual_ticker"] = manual_ticker
+            if qty is not None:
+                payload["qty"] = qty
+            if price is not None:
+                payload["price"] = price
+            if amount is not None:
+                payload["amount"] = amount
+            if fee is not None:
+                payload["fee"] = fee
+            if currency:
+                payload["currency"] = currency
+            if category_id:
+                payload["category_id"] = category_id
+            if investment_activity_label:
+                payload["investment_activity_label"] = investment_activity_label
+            if transfer_account_id:
+                payload["transfer_account_id"] = transfer_account_id
+
+            response = client.post(
+                "/api/v1/trades",
+                json={"trade": payload}
+            )
+            data = handle_response(response)
+
+            logger.info("✅ Created trade")
+            return json.dumps(data, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to create trade: {e}")
+        return f"Error creating trade: {str(e)}"
+
+
+@mcp.tool()
+def update_trade(
+    trade_id: str,
+    trade_type: Optional[str] = None,
+    date: Optional[str] = None,
+    qty: Optional[float] = None,
+    price: Optional[float] = None,
+    amount: Optional[float] = None,
+    currency: Optional[str] = None,
+    category_id: Optional[str] = None,
+    investment_activity_label: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> str:
+    """
+    Update an existing trade in Sure.
+
+    Args:
+        trade_id: The ID of the trade to update
+        trade_type: New type, one of "buy", "sell", "dividend", "deposit", "withdrawal", "interest"
+        date: New trade date in YYYY-MM-DD format
+        qty: New number of shares
+        price: New price per share
+        amount: New total cash amount
+        currency: New currency code
+        category_id: New category ID
+        investment_activity_label: New activity label
+        notes: New notes
+    """
+    try:
+        with get_client() as client:
+            payload: Dict[str, Any] = {}
+
+            if trade_type is not None:
+                payload["type"] = trade_type
+            if date is not None:
+                payload["date"] = date
+            if qty is not None:
+                payload["qty"] = qty
+            if price is not None:
+                payload["price"] = price
+            if amount is not None:
+                payload["amount"] = amount
+            if currency is not None:
+                payload["currency"] = currency
+            if category_id is not None:
+                payload["category_id"] = category_id
+            if investment_activity_label is not None:
+                payload["investment_activity_label"] = investment_activity_label
+            if notes is not None:
+                payload["notes"] = notes
+
+            response = client.patch(
+                f"/api/v1/trades/{encode_path_id(trade_id)}",
+                json={"trade": payload}
+            )
+            data = handle_response(response)
+
+            logger.info(f"✅ Updated trade {trade_id}")
+            return json.dumps(data, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to update trade: {e}")
+        return f"Error updating trade: {str(e)}"
+
+
+@mcp.tool()
+def delete_trade(trade_id: str) -> str:
+    """
+    Delete a trade from Sure.
+
+    Args:
+        trade_id: The ID of the trade to delete
+    """
+    try:
+        with get_client() as client:
+            response = client.delete(f"/api/v1/trades/{encode_path_id(trade_id)}")
+            data = handle_response(response)
+
+            logger.info(f"✅ Deleted trade {trade_id}")
+            return json.dumps(data, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to delete trade: {e}")
+        return f"Error deleting trade: {str(e)}"
+
+
+@mcp.tool()
+def get_holdings(
+    limit: int = 25,
+    account_id: Optional[str] = None,
+    account_ids: Optional[str] = None,
+    security_id: Optional[str] = None,
+    date: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> str:
+    """
+    Get stock holdings (positions) from Sure. Holdings are a read-only
+    snapshot Sure computes automatically from trades and market prices --
+    there is no create/update/delete for them, only viewing.
+
+    Args:
+        limit: Number of holdings per page (default: 25, max: 100)
+        account_id: Filter by a single investment account ID
+        account_ids: Comma-separated account IDs to filter by
+        security_id: Filter by a single security ID
+        date: Only return holdings as of this date (YYYY-MM-DD)
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+    """
+    try:
+        with get_client() as client:
+            params: Dict[str, Any] = {"per_page": min(limit, 100)}
+
+            if account_id:
+                params["account_id"] = account_id
+            if account_ids:
+                params["account_ids"] = account_ids
+            if security_id:
+                params["security_id"] = security_id
+            if date:
+                params["date"] = date
+            if start_date:
+                params["start_date"] = start_date
+            if end_date:
+                params["end_date"] = end_date
+
+            response = client.get("/api/v1/holdings", params=params)
+            data = handle_response(response)
+
+            # Handle paginated response
+            if isinstance(data, dict):
+                holdings = data.get("holdings") or data.get("data") or data
+                if isinstance(holdings, dict):
+                    holdings = holdings.get("holdings", [])
+            else:
+                holdings = data
+
+            logger.info(f"✅ Retrieved {len(holdings) if isinstance(holdings, list) else 'unknown'} holdings")
+            return json.dumps(holdings, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to get holdings: {e}")
+        return f"Error getting holdings: {str(e)}"
+
+
+@mcp.tool()
+def get_holding(holding_id: str) -> str:
+    """
+    Get a single holding by ID.
+
+    Args:
+        holding_id: The ID of the holding
+    """
+    try:
+        with get_client() as client:
+            response = client.get(f"/api/v1/holdings/{encode_path_id(holding_id)}")
+            data = handle_response(response)
+
+            return json.dumps(data, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to get holding: {e}")
+        return f"Error getting holding: {str(e)}"
 
 
 @mcp.tool()
